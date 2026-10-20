@@ -200,10 +200,21 @@
    * 2. UI state, views, admin session
    * ======================================================================= */
 
+  /**
+   * sessionStorage keeps the admin logged in across a page reload. Some hosts
+   * (sandboxed iframes, locked-down browsers) throw on ANY access to storage,
+   * so every call goes through these guards; without storage the admin simply
+   * has to log in again after a reload.
+   */
+  const SESSION_KEY = 'libraryAdminSession';
+  function sessionGet(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+  function sessionSet(key, value) { try { sessionStorage.setItem(key, value); } catch (e) { /* storage unavailable */ } }
+  function sessionRemove(key) { try { sessionStorage.removeItem(key); } catch (e) { /* storage unavailable */ } }
+
   const ui = {
     view: 'consumer',           // 'consumer' | 'admin-login' | 'admin'
     adminTab: 'dashboard',
-    adminLoggedIn: sessionStorage.getItem('libraryAdminSession') === '1',
+    adminLoggedIn: sessionGet(SESSION_KEY) === '1',
     lastActivity: Date.now(),
     consumer: { section: null, query: '', availability: 'all', sort: 'title' },
     collection: { query: '', section: 'all', status: 'all', selected: new Set() },
@@ -242,7 +253,7 @@
     if (!Store.verifyPassword(password)) return false;
     ui.adminLoggedIn = true;
     ui.lastActivity = Date.now();
-    sessionStorage.setItem('libraryAdminSession', '1');
+    sessionSet(SESSION_KEY, '1');
     ui.settingsPopulated = false;
     showView('admin');
     return true;
@@ -250,7 +261,7 @@
 
   function logout(reason) {
     ui.adminLoggedIn = false;
-    sessionStorage.removeItem('libraryAdminSession');
+    sessionRemove(SESSION_KEY);
     closeModal();
     showView('consumer');
     if (reason) toast(reason, 'info');
@@ -1094,6 +1105,25 @@ Feeling Good | David D. Burns | Self-Help &amp; Recovery"></textarea>
       if (el) handleAction(el);
     });
 
+    // Form submission without relying on the browser's native submit.
+    // Sandboxed hosts (an <iframe sandbox> without "allow-forms") silently block
+    // native submission, including the "submit" event, so a click on a submit
+    // button or Enter in a field would do nothing. We cancel the native action
+    // and dispatch the submit event ourselves; every form handler in this file
+    // listens for that event, and none of them need the native behaviour.
+    const submitForm = (form) => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[type="submit"]');
+      if (btn && btn.form && !btn.disabled) { e.preventDefault(); submitForm(btn.form); }
+    });
+    document.addEventListener('keydown', (e) => {
+      const t = e.target;
+      if (e.key === 'Enter' && t && t.tagName === 'INPUT' && t.form && !['checkbox', 'radio', 'file'].includes(t.type)) {
+        e.preventDefault();
+        submitForm(t.form);
+      }
+    });
+
     // Track activity for the admin idle timeout.
     ['click', 'keydown', 'mousemove', 'touchstart'].forEach((ev) => document.addEventListener(ev, () => { ui.lastActivity = Date.now(); }, { passive: true }));
     setInterval(checkIdleTimeout, 30000);
@@ -1197,5 +1227,9 @@ Feeling Good | David D. Burns | Self-Help &amp; Recovery"></textarea>
     showView('consumer');
   }
 
-  document.addEventListener('DOMContentLoaded', init);
+  // Start once the DOM is ready. Some hosts inject this page after the document
+  // has already finished loading, in which case DOMContentLoaded never fires
+  // again, so run immediately when the document is already parsed.
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 })();
