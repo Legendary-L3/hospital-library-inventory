@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<!--
+  Hospital Consumer Library - Inventory & Circulation
+  ===================================================================
+  Single-page application. Open this file directly in a browser (double-click)
+  or serve the folder from any static web server. No build step, no internet
+  connection and no server-side code are required.
+
+  FILE MAP
+    index.html        this file: page structure only (no logic, no styling)
+    css/styles.css    all styling, including the @media print rules for labels
+    js/sha256.js      password hashing
+    js/barcode.js     Code 128 / Code 39 barcode generator (SVG)
+    js/store.js       data model, business rules, localStorage + JSON import/export
+    js/app.js         UI: rendering, event handling, consumer & admin views
+    sample-data.json  example library you can import from Admin > Data
+
+  HOW THE PAGE IS ORGANISED
+    <header>  library name, Consumer / Admin switch, save status indicator
+    <main>    one <section class="view"> per screen; app.js toggles .hidden
+    #modal-root, #toast-root   containers filled by app.js at runtime
+    #print-area                filled with labels right before window.print();
+                               the print stylesheet hides everything else
+
+  Default admin password: admin   (change it in Admin > Settings!)
+  ===================================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consumer Library</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <!-- ===================================================================
+       Header: title, view switcher, save indicator
+       =================================================================== -->
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-icon" aria-hidden="true">&#128218;</span>
+      <h1 id="library-name">Consumer Library</h1>
+    </div>
+    <nav class="view-switch" aria-label="Choose view">
+      <button type="button" class="nav-btn active" id="nav-consumer" data-view="consumer">Library</button>
+      <button type="button" class="nav-btn" id="nav-admin" data-view="admin">Admin</button>
+    </nav>
+    <div class="header-status">
+      <span id="save-indicator" class="save-indicator" title="Data is saved automatically in this browser">Saved</span>
+      <button type="button" class="btn btn-small btn-ghost hidden" id="btn-logout">Log out</button>
+    </div>
+  </header>
+
+  <!-- Shown when localStorage is unavailable or full, so staff export a backup. -->
+  <div id="storage-warning" class="banner banner-danger hidden" role="alert"></div>
+
+  <main>
+
+    <!-- =================================================================
+         CONSUMER VIEW  (kiosk mode; no password)
+         ================================================================= -->
+    <section id="view-consumer" class="view">
+
+      <!-- Scan box: barcode scanners act like keyboards and send Enter after the code. -->
+      <div class="scan-bar">
+        <label for="consumer-scan" class="scan-label">Check out or return</label>
+        <input type="text" id="consumer-scan" class="scan-input" autocomplete="off"
+               placeholder="Scan a barcode (or type it) and press Enter">
+        <p class="scan-hint">You can also tap any book below to check it out or return it.</p>
+      </div>
+
+      <!-- Popular section buttons; filled from settings.sections by app.js -->
+      <h2 class="section-title">Browse by section</h2>
+      <div id="section-buttons" class="section-buttons" role="group" aria-label="Sections"></div>
+
+      <!-- General catalog with search -->
+      <div class="catalog-controls">
+        <input type="search" id="consumer-search" class="search-input" autocomplete="off"
+               placeholder="Search by title, author, subject or ISBN">
+        <select id="consumer-availability" aria-label="Availability filter">
+          <option value="all">All items</option>
+          <option value="available">Available now</option>
+          <option value="checked_out">Checked out</option>
+        </select>
+        <select id="consumer-sort" aria-label="Sort order">
+          <option value="title">Sort: Title A-Z</option>
+          <option value="author">Sort: Author A-Z</option>
+          <option value="newest">Sort: Recently added</option>
+        </select>
+      </div>
+      <p id="consumer-result-count" class="result-count"></p>
+      <div id="consumer-results" class="card-grid"></div>
+    </section>
+
+    <!-- =================================================================
+         ADMIN LOGIN
+         ================================================================= -->
+    <section id="view-admin-login" class="view hidden">
+      <form id="login-form" class="login-card" autocomplete="off">
+        <h2>Staff login</h2>
+        <p class="muted">Enter the admin password to manage the collection.</p>
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" required autocomplete="current-password">
+        <p id="login-error" class="form-error" role="alert"></p>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">Log in</button>
+          <button type="button" class="btn btn-ghost" data-view="consumer">Back to library</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- =================================================================
+         ADMIN VIEW
+         ================================================================= -->
+    <section id="view-admin" class="view hidden">
+
+      <div id="default-password-warning" class="banner banner-warn hidden">
+        The admin password is still the default (<code>admin</code>). Change it under <strong>Settings</strong>.
+      </div>
+
+      <!-- Tabs: app.js toggles .active on buttons and .hidden on panels -->
+      <nav class="tabs" role="tablist" aria-label="Admin sections">
+        <button type="button" class="tab active" data-tab="dashboard" role="tab">Dashboard</button>
+        <button type="button" class="tab" data-tab="collection" role="tab">Collection</button>
+        <button type="button" class="tab" data-tab="circulation" role="tab">Circulation</button>
+        <button type="button" class="tab" data-tab="labels" role="tab">Labels</button>
+        <button type="button" class="tab" data-tab="reports" role="tab">Reports</button>
+        <button type="button" class="tab" data-tab="settings" role="tab">Settings</button>
+        <button type="button" class="tab" data-tab="data" role="tab">Data</button>
+      </nav>
+
+      <!-- Dashboard ---------------------------------------------------- -->
+      <div id="tab-dashboard" class="tab-panel" role="tabpanel">
+        <div id="dashboard-stats" class="stat-grid"></div>
+        <div class="two-col">
+          <div class="panel">
+            <h3>Overdue items</h3>
+            <div id="dashboard-overdue"></div>
+          </div>
+          <div class="panel">
+            <h3>Recent activity</h3>
+            <div id="dashboard-activity"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Collection --------------------------------------------------- -->
+      <div id="tab-collection" class="tab-panel hidden" role="tabpanel">
+        <div class="toolbar">
+          <input type="search" id="admin-search" class="search-input" placeholder="Search title, author, barcode, ISBN, tag" autocomplete="off">
+          <select id="admin-section-filter" aria-label="Filter by section"></select>
+          <select id="admin-status-filter" aria-label="Filter by status">
+            <option value="all">All statuses</option>
+            <option value="available">Available</option>
+            <option value="checked_out">Checked out</option>
+            <option value="lost">Lost</option>
+            <option value="withdrawn">Withdrawn</option>
+          </select>
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="btn-bulk-add">Bulk add</button>
+          <button type="button" class="btn btn-primary" id="btn-add-item">+ Add item</button>
+        </div>
+        <div class="toolbar toolbar-secondary">
+          <label class="checkbox-label"><input type="checkbox" id="admin-select-all"> Select all shown</label>
+          <span id="admin-selection-count" class="muted"></span>
+          <span class="spacer"></span>
+          <button type="button" class="btn btn-small" id="btn-print-selected" disabled>Print labels for selected</button>
+          <button type="button" class="btn btn-small" id="btn-export-selected-csv" disabled>Export selected (CSV)</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="admin-items-table">
+            <thead>
+              <tr>
+                <th class="col-check"></th>
+                <th>Barcode</th>
+                <th>Title</th>
+                <th>Author</th>
+                <th>Section</th>
+                <th>Format</th>
+                <th>Status</th>
+                <th>Label</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="admin-items-count" class="result-count"></p>
+      </div>
+
+      <!-- Circulation -------------------------------------------------- -->
+      <div id="tab-circulation" class="tab-panel hidden" role="tabpanel">
+        <div class="scan-bar scan-bar-admin">
+          <label for="admin-scan" class="scan-label">Scan to check out / return</label>
+          <input type="text" id="admin-scan" class="scan-input" autocomplete="off"
+                 placeholder="Scan or type a barcode, then press Enter">
+          <p class="scan-hint">Available items open the check-out form; checked-out items open the return form.</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Active loans <span id="active-loan-count" class="pill"></span></h3>
+            <div class="toolbar-inline">
+              <input type="search" id="loans-search" class="search-input-small" placeholder="Filter by name, title, barcode" autocomplete="off">
+              <select id="loans-unit-filter" aria-label="Filter by unit"></select>
+              <label class="checkbox-label"><input type="checkbox" id="loans-overdue-only"> Overdue only</label>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="active-loans-table">
+              <thead>
+                <tr>
+                  <th>Title</th><th>Barcode</th><th>Patron</th><th>Unit</th><th>Room/Bed</th>
+                  <th>Checked out</th><th>Due</th><th>Via</th><th class="col-actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Loan history</h3>
+            <div class="toolbar-inline">
+              <input type="search" id="history-search" class="search-input-small" placeholder="Filter history" autocomplete="off">
+              <select id="history-unit-filter" aria-label="Filter history by unit"></select>
+              <input type="date" id="history-from" aria-label="From date">
+              <input type="date" id="history-to" aria-label="To date">
+              <button type="button" class="btn btn-small" id="btn-export-loans-csv">Export CSV</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="history-table">
+              <thead>
+                <tr>
+                  <th>Title</th><th>Barcode</th><th>Patron</th><th>Unit</th>
+                  <th>Checked out</th><th>Due</th><th>Returned</th><th>Outcome</th><th>Condition / notes</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p id="history-count" class="result-count"></p>
+        </div>
+      </div>
+
+      <!-- Labels ------------------------------------------------------- -->
+      <div id="tab-labels" class="tab-panel hidden" role="tabpanel">
+        <div class="panel">
+          <h3>Print barcode labels</h3>
+          <p class="muted">
+            Barcodes are generated automatically when an item is added. Choose which items to
+            print, pick a layout that matches your label stock, then click <strong>Print</strong>.
+            Use the browser's print dialog to select the printer; set scaling to 100% and
+            disable headers/footers for accurate label positions.
+          </p>
+          <div class="toolbar">
+            <select id="labels-scope" aria-label="Which items">
+              <option value="unprinted">Items without a printed label</option>
+              <option value="selected">Items selected in Collection tab</option>
+              <option value="all">All items</option>
+            </select>
+            <select id="labels-layout" aria-label="Label layout">
+              <option value="sheet30">Sheet: 30 per page (2.625 x 1 in, Avery 5160/8160)</option>
+              <option value="sheet10">Sheet: 10 per page (4 x 2 in, Avery 5163/8163)</option>
+              <option value="roll">Roll / thermal printer: one label per page (2.25 x 1.25 in)</option>
+            </select>
+            <label class="checkbox-label"><input type="checkbox" id="labels-include-title" checked> Include title &amp; section</label>
+            <span class="spacer"></span>
+            <button type="button" class="btn btn-primary" id="btn-print-labels">Print</button>
+          </div>
+          <p id="labels-count" class="result-count"></p>
+          <div id="labels-preview" class="label-preview"></div>
+        </div>
+      </div>
+
+      <!-- Reports ------------------------------------------------------ -->
+      <div id="tab-reports" class="tab-panel hidden" role="tabpanel">
+        <div class="two-col">
+          <div class="panel">
+            <h3>Loans by hospital unit</h3>
+            <div id="report-units"></div>
+          </div>
+          <div class="panel">
+            <h3>Collection by section</h3>
+            <div id="report-sections"></div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div class="panel">
+            <h3>Most borrowed titles</h3>
+            <div id="report-popular"></div>
+          </div>
+          <div class="panel">
+            <h3>Activity log</h3>
+            <div id="report-activity" class="scroll-box"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings ----------------------------------------------------- -->
+      <div id="tab-settings" class="tab-panel hidden" role="tabpanel">
+        <form id="settings-form" class="two-col">
+          <div class="panel">
+            <h3>General</h3>
+            <label for="set-library-name">Library name (shown in the header)</label>
+            <input type="text" id="set-library-name" required>
+            <label for="set-loan-period">Loan period (days)</label>
+            <input type="number" id="set-loan-period" min="1" max="365" required>
+            <label for="set-max-loans">Maximum items per patron (0 = no limit; admins can override)</label>
+            <input type="number" id="set-max-loans" min="0" max="50" required>
+            <label for="set-auto-logout">Admin auto-logout after inactivity (minutes, 0 = never)</label>
+            <input type="number" id="set-auto-logout" min="0" max="480" required>
+
+            <h3>Barcodes</h3>
+            <label for="set-barcode-prefix">Barcode prefix (letters/digits, e.g. LIB)</label>
+            <input type="text" id="set-barcode-prefix" pattern="[A-Za-z0-9\-]{0,10}" required>
+            <label for="set-barcode-digits">Number of digits after the prefix</label>
+            <input type="number" id="set-barcode-digits" min="1" max="12" required>
+            <label for="set-barcode-symbology">Symbology</label>
+            <select id="set-barcode-symbology">
+              <option value="code128">Code 128 (recommended, compact)</option>
+              <option value="code39">Code 39 (longer, very tolerant of cheap scanners)</option>
+            </select>
+            <label for="set-barcode-width">Bar width (1 = thin ... 4 = thick; increase if scanners struggle)</label>
+            <input type="number" id="set-barcode-width" min="1" max="4" step="0.5" required>
+            <p class="muted">Next barcode will be: <code id="set-next-barcode"></code></p>
+          </div>
+
+          <div class="panel">
+            <h3>Lists</h3>
+            <p class="muted">One entry per line. Order of sections = order of the consumer buttons.</p>
+            <label for="set-sections">Sections</label>
+            <textarea id="set-sections" rows="8"></textarea>
+            <label for="set-units">Hospital units</label>
+            <textarea id="set-units" rows="6"></textarea>
+            <label for="set-formats">Item formats</label>
+            <textarea id="set-formats" rows="4"></textarea>
+          </div>
+
+          <div class="panel full-width">
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Save settings</button>
+              <span id="settings-saved" class="muted"></span>
+            </div>
+          </div>
+        </form>
+
+        <form id="password-form" class="panel">
+          <h3>Change admin password</h3>
+          <div class="three-col">
+            <div>
+              <label for="pw-current">Current password</label>
+              <input type="password" id="pw-current" required autocomplete="current-password">
+            </div>
+            <div>
+              <label for="pw-new">New password</label>
+              <input type="password" id="pw-new" required minlength="4" autocomplete="new-password">
+            </div>
+            <div>
+              <label for="pw-confirm">Confirm new password</label>
+              <input type="password" id="pw-confirm" required minlength="4" autocomplete="new-password">
+            </div>
+          </div>
+          <p id="pw-error" class="form-error" role="alert"></p>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Change password</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Data --------------------------------------------------------- -->
+      <div id="tab-data" class="tab-panel hidden" role="tabpanel">
+        <div class="two-col">
+          <div class="panel">
+            <h3>Export (backup)</h3>
+            <p class="muted">
+              Downloads one JSON file containing everything: settings, the collection, all
+              loans and the activity log. Do this regularly and store the file on a network
+              drive - browser storage can be cleared by IT policies or by switching computers.
+            </p>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="btn-export-json">Download JSON backup</button>
+              <button type="button" class="btn" id="btn-copy-json">Copy JSON to clipboard</button>
+            </div>
+            <p id="export-status" class="muted"></p>
+          </div>
+
+          <div class="panel">
+            <h3>Import (restore / move)</h3>
+            <p class="muted">Choose a JSON file exported by this application.</p>
+            <input type="file" id="import-file" accept="application/json,.json">
+            <div class="radio-group">
+              <label><input type="radio" name="import-mode" value="replace" checked> <strong>Replace</strong> - the file becomes the entire library (including settings and password)</label>
+              <label><input type="radio" name="import-mode" value="merge"> <strong>Merge</strong> - add/update items and loans from the file; keep this computer's settings</label>
+            </div>
+            <div id="import-preview" class="import-preview hidden"></div>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="btn-import-apply" disabled>Import</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Other</h3>
+          <div class="form-actions">
+            <button type="button" class="btn" id="btn-load-sample">Load sample data (merge)</button>
+            <button type="button" class="btn btn-danger" id="btn-reset-all">Erase everything</button>
+          </div>
+          <p class="muted">
+            Data is stored in this browser under the key <code id="storage-key"></code>.
+            Approximate size: <span id="storage-size"></span>.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>Consumer Library inventory &amp; circulation</span>
+    <span id="footer-counts"></span>
+  </footer>
+
+  <!-- Runtime containers -->
+  <div id="modal-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <!-- Filled with label markup immediately before printing; see css @media print -->
+  <div id="print-area" aria-hidden="true"></div>
+
+  <!-- Scripts: order matters (each file depends on the ones above it) -->
+  <script src="js/sha256.js"></script>
+  <script src="js/barcode.js"></script>
+  <script src="js/store.js"></script>
+  <!-- Optional: example data for the "Load sample data" button (safe to delete in production) -->
+  <script src="js/sample-data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
